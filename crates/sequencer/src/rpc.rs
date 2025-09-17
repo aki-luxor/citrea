@@ -4,8 +4,10 @@ use std::time::Instant;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, Bytes, B256};
-use alloy_rpc_types::Transaction;
+use alloy_rpc_types::{BlockNumberOrTag, Header as AlloyRpcHeader, Transaction};
+use alloy_rpc_types_eth::Block as AlloyRpcBlock;
 use alloy_rpc_types_txpool::TxpoolContent;
+use alloy_serde::{OtherFields, WithOtherFields};
 use citrea_common::rpc::utils::internal_rpc_error;
 use citrea_evm::Evm;
 use citrea_stf::runtime::DefaultContext;
@@ -13,6 +15,7 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{ErrorCode, ErrorObject};
 use parking_lot::Mutex;
+use reth_primitives::Header as AlloyHeader;
 use reth_rpc::eth::EthTxBuilder;
 use reth_rpc_eth_types::error::EthApiError;
 use reth_rpc_types_compat::TransactionCompat;
@@ -44,6 +47,8 @@ pub struct RpcContext {
     pub ledger: LedgerDB,
     /// Whether the sequencer is running in test mode
     pub test_mode: bool,
+    /// Block production interval in milliseconds
+    pub block_production_interval_ms: u64,
 }
 
 /// Creates a shared RpcContext with all required data.
@@ -55,6 +60,7 @@ pub struct RpcContext {
 /// * `storage` - Storage for the sequencer state
 /// * `ledger_db` - Ledger database access
 /// * `test_mode` - Whether the sequencer is running in test mode
+/// * `block_production_interval_ms` - Block production interval in milliseconds
 pub fn create_rpc_context(
     mempool: Arc<CitreaMempool>,
     deposit_mempool: Arc<Mutex<DepositDataMempool>>,
@@ -62,6 +68,7 @@ pub fn create_rpc_context(
     storage: <DefaultContext as Spec>::Storage,
     ledger_db: LedgerDB,
     test_mode: bool,
+    block_production_interval_ms: u64,
 ) -> RpcContext {
     RpcContext {
         mempool,
@@ -70,6 +77,7 @@ pub fn create_rpc_context(
         storage,
         ledger: ledger_db,
         test_mode,
+        block_production_interval_ms,
     }
 }
 
@@ -85,6 +93,10 @@ pub fn register_rpc_methods(
     rpc_context: RpcContext,
     mut rpc_methods: jsonrpsee::RpcModule<()>,
 ) -> Result<jsonrpsee::RpcModule<()>, jsonrpsee::core::RegisterMethodError> {
+    // Remove the EVM's eth_getBlockByNumber method since we're providing our own
+    // implementation that includes pending block support with mempool transactions
+    let _ = rpc_methods.remove_method("eth_getBlockByNumber");
+
     let rpc = create_rpc_module(rpc_context);
     rpc_methods.merge(rpc)?;
     Ok(rpc_methods)
@@ -177,6 +189,21 @@ pub trait SequencerRpc {
     /// Returns the hashes of the removed transactions.
     #[method(name = "txpool_removeTransactionsBySender")]
     async fn txpool_remove_txs_by_sender(&self, sender: Address) -> RpcResult<Vec<B256>>;
+
+    /// Handler for: `eth_getBlockByNumber`
+    ///
+    /// Returns information about a block by number.
+    /// Supports pending blocks by including transactions from the mempool.
+    ///
+    /// # Arguments
+    /// * `block_number` - The block number to query (supports tags like "latest", "pending", etc.)
+    /// * `details` - If true, returns full transaction objects; if false, only transaction hashes
+    #[method(name = "eth_getBlockByNumber")]
+    fn eth_get_block_by_number(
+        &self,
+        block_number: Option<BlockNumberOrTag>,
+        details: Option<bool>,
+    ) -> RpcResult<Option<WithOtherFields<AlloyRpcBlock>>>;
 }
 
 /// Sequencer RPC server implementation
@@ -423,6 +450,123 @@ impl SequencerRpcServer for SequencerRpcServerImpl {
         let removed_txs = self.context.mempool.remove_transactions_by_sender(sender);
         let removed_hashes: Vec<B256> = removed_txs.iter().map(|tx| *tx.hash()).collect();
         Ok(removed_hashes)
+    }
+
+    /// Handler for: `eth_getBlockByNumber`
+    fn eth_get_block_by_number(
+        &self,
+        block_number: Option<BlockNumberOrTag>,
+        details: Option<bool>,
+    ) -> RpcResult<Option<WithOtherFields<AlloyRpcBlock>>> {
+        debug!(
+            "Sequencer: eth_getBlockByNumber({:?}, {:?})",
+            block_number, details
+        );
+
+        let block_number = block_number.unwrap_or(BlockNumberOrTag::Latest);
+
+        if block_number == BlockNumberOrTag::Pending {
+            let evm = Evm::<DefaultContext>::default();
+            let mut working_set = WorkingSet::new(self.context.storage.clone());
+
+            let latest_block = match evm.get_block_by_number(
+                Some(BlockNumberOrTag::Latest),
+                Some(false),
+                &mut working_set,
+                &self.context.ledger,
+            )? {
+                Some(block) => block,
+                None => return Ok(None),
+            };
+
+            let all_pool_txs = self.context.mempool.all_transactions();
+            let pending_txs = all_pool_txs.pending;
+
+            let pending_number = latest_block.header.number + 1;
+            let block_interval_seconds = self.context.block_production_interval_ms / 1000;
+            let pending_timestamp = latest_block.header.timestamp + block_interval_seconds;
+
+            let total_gas_used: u128 = pending_txs.iter().map(|tx| tx.gas_limit() as u128).sum();
+            let pending_gas_used =
+                total_gas_used.min(latest_block.header.inner.gas_limit as u128) as u64;
+
+            let pending_inner = AlloyHeader {
+                parent_hash: latest_block.header.hash,
+                ommers_hash: B256::default(),
+                beneficiary: latest_block.header.inner.beneficiary,
+                state_root: B256::ZERO,
+                transactions_root: B256::default(),
+                receipts_root: B256::default(),
+                withdrawals_root: None,
+                logs_bloom: Default::default(),
+                extra_data: Bytes::default(),
+                nonce: Default::default(),
+                difficulty: latest_block.header.inner.difficulty,
+                number: pending_number,
+                gas_limit: latest_block.header.inner.gas_limit,
+                gas_used: pending_gas_used,
+                timestamp: pending_timestamp,
+                mix_hash: B256::ZERO,
+                base_fee_per_gas: latest_block.header.inner.base_fee_per_gas,
+                blob_gas_used: None,
+                excess_blob_gas: latest_block.header.inner.excess_blob_gas,
+                parent_beacon_block_root: None,
+                requests_hash: None,
+            };
+
+            let pending_header = AlloyRpcHeader::new(pending_inner);
+
+            let transactions = if details == Some(true) {
+                let mut txs = Vec::new();
+                for (index, pool_tx) in pending_txs.iter().enumerate() {
+                    let tx_signed_ec_recovered = pool_tx.to_consensus();
+                    let mut tx = EthTxBuilder::default()
+                        .fill_pending(tx_signed_ec_recovered)
+                        .expect("EthTxBuilder fill can't fail");
+
+                    tx.block_hash = None;
+                    tx.block_number = Some(pending_number);
+                    tx.transaction_index = Some(index as u64);
+
+                    txs.push(tx);
+                }
+                alloy_rpc_types::BlockTransactions::Full(txs)
+            } else {
+                let hashes: Vec<B256> = pending_txs.iter().map(|tx| *tx.hash()).collect();
+                alloy_rpc_types::BlockTransactions::Hashes(hashes)
+            };
+
+            let pending_block = AlloyRpcBlock {
+                header: pending_header,
+                uncles: Default::default(),
+                transactions,
+                withdrawals: None,
+            };
+
+            let rpc_block = WithOtherFields {
+                inner: pending_block,
+                other: OtherFields::from_iter([(
+                    "l1FeeRate".to_string(),
+                    latest_block
+                        .other
+                        .get("l1FeeRate")
+                        .cloned()
+                        .unwrap_or_else(|| "0x0".into()),
+                )]),
+            };
+
+            Ok(Some(rpc_block))
+        } else {
+            let evm = Evm::<DefaultContext>::default();
+            let mut working_set = WorkingSet::new(self.context.storage.clone());
+
+            evm.get_block_by_number(
+                Some(block_number),
+                details,
+                &mut working_set,
+                &self.context.ledger,
+            )
+        }
     }
 }
 
