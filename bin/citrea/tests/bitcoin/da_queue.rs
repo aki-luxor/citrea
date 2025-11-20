@@ -227,7 +227,7 @@ impl DaTransactionQueueingTest {
         da.generate(1).await?;
 
         // Make sure txs are rebroadcasted from monitoring service
-        da.wait_mempool_len(5, None).await?;
+        da.wait_mempool_len(5, Some(Duration::from_secs(120))).await?;
         let raw_mempool = da.get_raw_mempool().await?;
         assert_eq!(dropped_txs, raw_mempool);
 
@@ -564,7 +564,8 @@ impl DaTransactionQueueingUtxoSelectionModeOldestTest {
         da.generate(1).await?;
 
         // Make sure txs are rebroadcasted from monitoring service
-        da.wait_mempool_len(5 * 2, None).await?;
+        da.wait_mempool_len(5 * 2, Some(Duration::from_secs(120)))
+            .await?;
         let raw_mempool = da.get_raw_mempool().await?;
         assert_eq!(dropped_txs, raw_mempool);
 
