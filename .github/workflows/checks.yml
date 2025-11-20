@@ -345,7 +345,7 @@ jobs:
     needs:
       - docker-setup
     name: nextest
-    runs-on: tenki-standard-xlarge-32c-128g
+    runs-on: tenki-standard-xlarge-plus-64c-256g
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
