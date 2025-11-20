@@ -49,12 +49,6 @@ on:
         description: 'Set RUST_LOG level (optional)'
         required: false
         type: string
-  merge_group:
-    types: ["checks_requested"]
-  push:
-    branches: ["nightly", "release-v*"]
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
 
 run-name: ${{ inputs.custom_name || github.event.pull_request.title || github.sha }}
 
@@ -66,19 +60,21 @@ env:
 
 # Automatically cancels a job if a new commit if pushed to the same PR, branch, or tag.
 # Source: <https://stackoverflow.com/a/72408109/5148606>
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Except in `nightly` and `stable` branches! Any cancelled job will cause the
-  # CI run to fail, and we want to keep a clean history for major branches.
-  cancel-in-progress: ${{ (github.ref != 'refs/heads/nightly') && (github.ref != 'refs/heads/devnet-freeze') && (github.ref != 'refs/heads/main') }}
+# concurrency:
+#   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+#   # Except in `nightly` and `stable` branches! Any cancelled job will cause the
+#   # CI run to fail, and we want to keep a clean history for major branches.
+#   cancel-in-progress: ${{ (github.ref != 'refs/heads/nightly') && (github.ref != 'refs/heads/devnet-freeze') && (github.ref != 'refs/heads/main') }}
 
 jobs:
   build:
     name: build
-    runs-on: ubicloud-standard-30
+    runs-on: tenki-standard-xlarge-plus-64c-256g
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
+      - name: Stop alloy service
+        run: sudo service alloy stop || true
       - uses: rui314/setup-mold@v1
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -114,10 +110,11 @@ jobs:
 
   check:
     name: check
-    runs-on: ubicloud-standard-4
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
+
       - uses: rui314/setup-mold@v1
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -147,7 +144,7 @@ jobs:
 
   udeps:
     name: udeps
-    runs-on: ubicloud-standard-8
+    runs-on: tenki-standard-xlarge-32c-128g
     timeout-minutes: 60
     if: github.event.pull_request.draft == false
     steps:
@@ -179,7 +176,7 @@ jobs:
           args: "--workspace --all-features --all-targets"
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-small-2c-4g
     if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v5
@@ -191,14 +188,14 @@ jobs:
   coverage:
     needs:
       - docker-setup
-    runs-on: ubicloud-standard-30
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: llvm-tools-preview
-      - name: Rust Cache
-        uses: ubicloud/rust-cache@v2
+      # - name: Rust Cache
+      #   uses: ubicloud/rust-cache@v2
       - name: Setup env
         if: ${{ github.event.inputs.RUST_LOG != '' }}
         run: echo "RUST_LOG=${{ github.event.inputs.RUST_LOG }}" >> $GITHUB_ENV
@@ -244,7 +241,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   uniswap:
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     needs: build
     if: github.event.pull_request.draft == false
     steps:
@@ -286,7 +283,7 @@ jobs:
           fi
 
   web3_py:
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     needs: build
     if: github.event.pull_request.draft == false
     steps:
@@ -315,7 +312,7 @@ jobs:
           python test.py
 
   ethers_js:
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     needs: build
     if: github.event.pull_request.draft == false
     steps:
@@ -348,7 +345,7 @@ jobs:
     needs:
       - docker-setup
     name: nextest
-    runs-on: ubicloud-standard-30
+    runs-on: tenki-standard-xlarge-32c-128g
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
@@ -404,7 +401,7 @@ jobs:
     strategy:
       fail-fast: true
     name: Foundry project
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v5
@@ -433,7 +430,7 @@ jobs:
     strategy:
       fail-fast: true
     name: Check Genesis Files
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v5
@@ -455,7 +452,7 @@ jobs:
         shell: bash
 
   docker-setup:
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -491,7 +488,7 @@ jobs:
 
   codespell:
     name: codespell
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - uses: actions/checkout@v5
 
@@ -510,7 +507,7 @@ jobs:
 
   proving-stats:
     name: Proving stats
-    runs-on: ubicloud-standard-2
+    runs-on: tenki-standard-small-2c-4g
     needs: [build, docker-setup]
     if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'guest-code')
     steps:
@@ -552,98 +549,97 @@ jobs:
           chmod +x ./.github/scripts/run-proving-test.sh
           ./.github/scripts/run-proving-test.sh patch-stats.json
         shell: bash
-      # Run/recover tests on the base branch
+
       - name: Get current commit hash
         id: current-commit
         run: |
           echo "patch-hash=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
           echo "head-hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Get commit hash of the base branch
-        id: base-commit
+      - name: Get commit hash of nightly branch
+        id: nightly-commit
         run: |
-            BASE_REF="${{ github.event.pull_request.base.ref }}"
-            git fetch origin "$BASE_REF"
-            echo "base-hash=$(git rev-parse origin/"$BASE_REF")" >> $GITHUB_OUTPUT
+          git fetch origin nightly
+          echo "nightly-hash=$(git rev-parse origin/nightly)" >> $GITHUB_OUTPUT
 
-      - name: Restore base branch test cache
-        id: restore-test-cache
+      - name: Restore nightly test cache
+        id: restore-nightly
         uses: actions/cache@v4
         with:
-          path: proving-stats/results/base-stats.json
-          key: proving-stats-${{ steps.base-commit.outputs.base-hash }}
+          path: proving-stats/results/nightly-stats.json
+          key: nightly-proving-stats-${{ steps.nightly-commit.outputs.nightly-hash }}
 
       # --- Run test only if cache missed ---
-      - name: Download base build artifact
+      - name: Download nightly build artifact
         id: download-artifact
-        if: steps.restore-test-cache.outputs.cache-hit != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v11
         with:
           name: citrea-build
-          ref: ${{ steps.base-commit.outputs.base-hash }}
+          ref: nightly
           path: target/debug
           if_no_artifact_found: warn
-          workflow_conclusion: ""
 
-      - name: Checkout to base branch
-        if: steps.restore-test-cache.outputs.cache-hit != 'true'
-        run: git checkout -f ${{ steps.base-commit.outputs.base-hash }}
+      # --- Build only if the artifact is not found ---
+      - name: Checkout nightly branch
+        if: steps.restore-nightly.outputs.cache-hit != 'true'
+        run: git checkout -f ${{ steps.nightly-commit.outputs.nightly-hash }}
 
       # install risc0 again as version may differ between branches
       - name: Install risc0
-        if: steps.restore-test-cache.outputs.cache-hit != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true'
         uses: ./.github/actions/install-risc0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # --- Build only if the artifact is not found ---
       - name: Install Rust toolchain
-        if: steps.restore-test-cache.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Setup mold linker
-        if: steps.restore-test-cache.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
         uses: rui314/setup-mold@v1
 
       - name: Install Protoc
-        if: steps.restore-test-cache.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
         uses: arduino/setup-protoc@v3
         with:
           version: "23.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Rust cache
-        if: steps.restore-test-cache.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
         uses: ubicloud/rust-cache@v2
         with:
             shared-key: build
       - name: Cache ethereum-tests
-        if: steps.restore-test-cache.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
         uses: actions/cache@v4
         with:
           key: "eth-tests-1c23e3c"
           path: crates/evm/ethereum-tests
-      - name: Build citrea on the base branch
-        if: steps.restore-test-cache.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
+      - name: Build citrea on nightly
+        if: steps.restore-nightly.outputs.cache-hit != 'true' && steps.download-artifact.outputs.found_artifact != 'true'
         run: make build
 
       - name: Checkout to PR branch
-        if: steps.restore-test-cache.outputs.cache-hit != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true'
         run: git checkout ${{ steps.current-commit.outputs.head-hash }}
 
       # Sequencer DB is removed in run-proving-test.sh to avoid state corruption
       - name: Restore sequencer DB from test data
-        if: steps.restore-test-cache.outputs.cache-hit != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true'
         run: |
           unzip archive.zip "dbs/*" -d proving-stats/
       - name: Make citrea executable
-        if: steps.restore-test-cache.outputs.cache-hit != 'true'
+        if: steps.restore-nightly.outputs.cache-hit != 'true'
         run: chmod +x target/debug/citrea
-      - name: Run tests on the base branch
-        if: steps.restore-test-cache.outputs.cache-hit != 'true'
+      - name: Run tests on nightly
+        if: steps.restore-nightly.outputs.cache-hit != 'true'
         run: |
           chmod +x ./.github/scripts/run-proving-test.sh
-          ./.github/scripts/run-proving-test.sh base-stats.json
+          ./.github/scripts/run-proving-test.sh nightly-stats.json
         shell: bash
 
       - name: Compare the results
@@ -651,9 +647,9 @@ jobs:
         run: |
           python compare-results.py \
             --patch-file results/patch-stats.json \
-            --base-file results/base-stats.json \
+            --nightly-file results/nightly-stats.json \
             --patch-commit ${{ steps.current-commit.outputs.patch-hash }} \
-            --base-commit ${{ steps.base-commit.outputs.base-hash }}
+            --nightly-commit ${{ steps.nightly-commit.outputs.nightly-hash }}
       - name: Find Comment
         uses: peter-evans/find-comment@v3
         id: fc
