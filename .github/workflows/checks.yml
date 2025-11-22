@@ -188,7 +188,7 @@ jobs:
   coverage:
     needs:
       - docker-setup
-    runs-on: tenki-standard-small-2c-4g
+    runs-on: tenki-standard-xlarge-32c-128g
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.88.0
